@@ -22,4 +22,18 @@
       <Filter>源文件\ApplicationLayer</Filter>
     </ClCompile>
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="CustomVulkanUtils.h">
+      <Filter>源文件\ApplicationLayer</Filter>
+    </ClInclude>
+    <ClInclude Include="CustomQueueUtils.h">
+      <Filter>源文件\ApplicationLayer</Filter>
+    </ClInclude>
+    <ClInclude Include="CustomSwapChainUtils.h">
+      <Filter>源文件\ApplicationLayer</Filter>
+    </ClInclude>
+    <ClInclude Include="ShaderUtils.h">
+      <Filter>源文件\ApplicationLayer</Filter>
+    </ClInclude>
+  </ItemGroup>
 </Project>
