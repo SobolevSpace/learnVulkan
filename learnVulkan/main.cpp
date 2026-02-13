@@ -4,6 +4,11 @@
 #include <vector>
 #include <set>
 #include <array>
+#include <chrono>
+
+#define GLM_FORCE_RADIANS
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 #define VK_USE_PLATFORM_WIN32_KHR
 #define GLFW_INCLUDE_VULKAN
@@ -20,6 +25,7 @@
 #include "CustomQueueUtils.h"
 #include "CustomSwapChainUtils.h"
 #include "ShaderUtils.h"
+#include "BufferUtils.h"
 
 const std::vector<char const*> validationLayers = {
 	"VK_LAYER_KHRONOS_validation"
@@ -38,6 +44,12 @@ constexpr bool enableValidationLayers = true;
 constexpr uint32_t WIDTH = 800;
 constexpr uint32_t HEIGHT = 600;
 const int MAX_FRAMES_IN_FLIGHT = 2;
+
+struct UniformBufferObject {
+	glm::mat4 model;
+	glm::mat4 view;
+	glm::mat4 proj;
+};
 
 struct Vertex {
 	glm::vec2 pos;
@@ -123,6 +135,7 @@ private:
 
 	std::vector<VkImageView> swapChainImageViews;
 	VkRenderPass renderPass;
+	VkDescriptorSetLayout descriptorSetLayout;
 	VkPipelineLayout pipelineLayout;
 	VkPipeline graphicsPipeline;
 
@@ -136,6 +149,10 @@ private:
 	VkDeviceMemory vertexBufferMemory;
 	VkBuffer indexBuffer;
 	VkDeviceMemory indexBufferMemory;
+
+	std::vector<VkBuffer> uniformBuffers;
+	std::vector<VkDeviceMemory> uniformBuffersMemory;
+	std::vector<void*> uniformBuffersMapped;
 
 	std::vector<VkSemaphore> imageAvailableSemaphores;
 	std::vector<VkSemaphore> renderFinishedSemaphores;
@@ -164,11 +181,13 @@ private:
 		createSwapChain();
 		createImageViews();
 		createRenderPass();
+		createDescriptionLayout();
 		createGraphicsPipeline();
 		createFramebuffers();
 		createCommandPool();
 		createVertexBuffer();
 		createIndexBuffer();
+		createUniformBuffer();
 		createCommandBuffers();
 		createSyncObjects();
 	}
@@ -195,6 +214,11 @@ private:
 		}
 		vkDestroyCommandPool(device, commandPool, nullptr);
 	
+		for (size_t i = 0;i < MAX_FRAMES_IN_FLIGHT;i++) {
+			vkDestroyBuffer(device, uniformBuffers[i], nullptr);
+			vkFreeMemory(device, uniformBuffersMemory[i], nullptr);
+		}
+		vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
 		vkDestroyPipeline(device, graphicsPipeline, nullptr);
 		vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
 		vkDestroyRenderPass(device, renderPass, nullptr);
@@ -510,6 +534,23 @@ private:
 		}
 	}
 
+	void createDescriptionLayout() {
+		VkDescriptorSetLayoutBinding uboLayoutBinding{};
+		uboLayoutBinding.binding = 0;
+		uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		uboLayoutBinding.descriptorCount = 1;
+		uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+		uboLayoutBinding.pImmutableSamplers = nullptr;
+
+		VkDescriptorSetLayoutCreateInfo layoutInfo{};
+		layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		layoutInfo.bindingCount = 1;
+		layoutInfo.pBindings = &uboLayoutBinding;
+		if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout) != VK_SUCCESS) {
+			throw std::runtime_error("failed to create descriptor set layout!");
+		}
+	}
+
 	void createGraphicsPipeline() {
 		auto vertexShaderCode = ShaderUtils::readFile("./spv/trivert.spv");
 		auto fragShaderCode = ShaderUtils::readFile("./spv/trifrag.spv");
@@ -619,8 +660,8 @@ private:
 
 		VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo{};
 		pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-		pipelineLayoutCreateInfo.setLayoutCount = 0;
-		pipelineLayoutCreateInfo.pSetLayouts = nullptr;
+		pipelineLayoutCreateInfo.setLayoutCount = 1;
+		pipelineLayoutCreateInfo.pSetLayouts = &descriptorSetLayout;
 		pipelineLayoutCreateInfo.pushConstantRangeCount = 0;
 		pipelineLayoutCreateInfo.pPushConstantRanges = nullptr;
 		if (vkCreatePipelineLayout(device, &pipelineLayoutCreateInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
@@ -746,7 +787,7 @@ private:
 		VkDeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
 		VkBuffer tempBuffer;
 		VkDeviceMemory tempBufferMemory;
-		createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, tempBuffer, tempBufferMemory);
+		createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, tempBuffer, tempBufferMemory, queueFamilyIndices, device, physicalDevice);
 		void* data;
 		vkMapMemory(device, tempBufferMemory, 0, bufferSize, 0, &data);
 		{
@@ -754,8 +795,8 @@ private:
 		}
 		vkUnmapMemory(device, tempBufferMemory);
 
-		createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, vertexBuffer, vertexBufferMemory);
-		copyBuffer(tempBuffer, vertexBuffer, bufferSize);
+		createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, vertexBuffer, vertexBufferMemory, queueFamilyIndices, device, physicalDevice);
+		copyBuffer(tempBuffer, vertexBuffer, bufferSize, transferCommandPool, transferQueue, device);
 
 		vkDestroyBuffer(device, tempBuffer, nullptr);
 		vkFreeMemory(device, tempBufferMemory, nullptr);
@@ -765,7 +806,7 @@ private:
 		VkDeviceSize bufferSize = sizeof(indices[0]) * indices.size();
 		VkBuffer tempBuffer;
 		VkDeviceMemory tempBufferMemory;
-		createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, tempBuffer, tempBufferMemory);
+		createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, tempBuffer, tempBufferMemory, queueFamilyIndices, device, physicalDevice);
 		void* data;
 		vkMapMemory(device, tempBufferMemory, 0, bufferSize, 0, &data);
 		{
@@ -773,90 +814,26 @@ private:
 		}
 		vkUnmapMemory(device, tempBufferMemory);
 
-		createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, indexBuffer, indexBufferMemory);
-		copyBuffer(tempBuffer, indexBuffer, bufferSize);
+		createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, indexBuffer, indexBufferMemory, queueFamilyIndices, device, physicalDevice);
+		copyBuffer(tempBuffer, indexBuffer, bufferSize, transferCommandPool, transferQueue, device);
 
 		vkDestroyBuffer(device, tempBuffer, nullptr);
 		vkFreeMemory(device, tempBufferMemory, nullptr);
 	}
 
-	void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
-		uint32_t queueFamilies[] = {queueFamilyIndices.graphicsFamily.value(), queueFamilyIndices.transferFamily.value()};
+	void createUniformBuffer() {
+		VkDeviceSize bufferSize = sizeof(UniformBufferObject);
 
-		VkBufferCreateInfo bufferInfo{};
-		bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-		bufferInfo.size = size;
-		bufferInfo.usage = usage;
-		bufferInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
-		bufferInfo.queueFamilyIndexCount = 2;
-		bufferInfo.pQueueFamilyIndices = queueFamilies;
+		uniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+		uniformBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+		uniformBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
 
-		if (vkCreateBuffer(device, &bufferInfo, nullptr, &buffer) != VK_SUCCESS) {
-			throw std::runtime_error("failed to create vertex buffer.");
+		for (int i = 0;i < MAX_FRAMES_IN_FLIGHT;i++) {
+			createBuffer(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, uniformBuffers[i], uniformBuffersMemory[i], queueFamilyIndices, device, physicalDevice);
+			vkMapMemory(device, uniformBuffersMemory[i], 0, bufferSize, 0, &uniformBuffersMapped[i]);
 		}
-
-		VkMemoryRequirements memRequirements;
-		vkGetBufferMemoryRequirements(device, buffer, &memRequirements);
-
-		VkMemoryAllocateInfo allocInfo{};
-		allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-		allocInfo.allocationSize = memRequirements.size;
-		allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
-
-		if (vkAllocateMemory(device, &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
-			throw std::runtime_error("failed to allocate vertex buffer memory");
-		}
-
-		vkBindBufferMemory(device, buffer, bufferMemory, 0);
 	}
-
-	void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
-		VkCommandBufferAllocateInfo allocInfo{};
-		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-		allocInfo.commandPool = transferCommandPool;
-		allocInfo.commandBufferCount = 1;
-
-		VkCommandBuffer commandBuffer;
-		vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
-
-		VkCommandBufferBeginInfo beginInfo{};
-		beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-		beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-		vkBeginCommandBuffer(commandBuffer, &beginInfo);
-		{
-			VkBufferCopy copyRegion{};
-			copyRegion.srcOffset = 0;
-			copyRegion.dstOffset = 0;
-			copyRegion.size = size;
-			vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
-		}
-		vkEndCommandBuffer(commandBuffer);
-
-		VkSubmitInfo submitInfo{};
-		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-		submitInfo.commandBufferCount = 1;
-		submitInfo.pCommandBuffers = &commandBuffer;
-
-		vkQueueSubmit(transferQueue, 1, &submitInfo, VK_NULL_HANDLE);
-		vkQueueWaitIdle(transferQueue);
-
-		vkFreeCommandBuffers(device, transferCommandPool, 1, &commandBuffer);
-	}
-
-	uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
-		VkPhysicalDeviceMemoryProperties memProperties;
-		vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
-
-		for (uint32_t i = 0; i < memProperties.memoryTypeCount;i++) {
-			if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
-				return i;
-			}
-		}
-
-		throw std::runtime_error("failed to find suitable memory type");
-	}
+	
 
 	void createCommandBuffers() {
 		commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -941,6 +918,10 @@ private:
 		if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
 			throw std::runtime_error("failed to record command buffer!");
 		}
+	}
+
+	void updateUniformBuffer(uint32_t currentFrame) {
+		static auto startTime = std::chrono::high_resolution_clock::now();
 	}
 
 	void drawFrame() {
